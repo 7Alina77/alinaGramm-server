@@ -9,6 +9,9 @@ const bcrypt = require('bcryptjs');
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', message: 'Сервер работает!', port: PORT });
+});
 
 const server = http.createServer(app);
 const io = socketIo(server, {
