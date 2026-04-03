@@ -91,7 +91,6 @@ const upload = multer({
 
 // ============ API ============
 
-// Загрузка файла
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
@@ -115,10 +114,8 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-// Статическая раздача файлов
 app.use('/uploads', express.static(uploadDir));
 
-// Регистрация
 app.post('/api/register', async (req, res) => {
   const { username, password } = req.body;
   
@@ -161,7 +158,6 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-// Вход
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
   
@@ -200,7 +196,6 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// Получение списка пользователей
 app.get('/api/users', async (req, res) => {
   try {
     const result = await pool.query(
@@ -213,7 +208,6 @@ app.get('/api/users', async (req, res) => {
   }
 });
 
-// История сообщений
 app.post('/api/messages/history', async (req, res) => {
   const { user1, user2 } = req.body;
   
@@ -241,13 +235,27 @@ app.post('/api/messages/history', async (req, res) => {
       [user1, user2]
     );
     
-    const formattedMessages = result.rows.map(msg => ({
-      id: msg.id.toString(),
-      text: msg.message,
-      isMe: msg.is_me,
-      from: msg.from_username,
-      timestamp: msg.timestamp
-    }));
+    const formattedMessages = result.rows.map(msg => {
+      let text = msg.message;
+      let file = null;
+      
+      try {
+        const parsed = JSON.parse(msg.message);
+        if (parsed.file) {
+          text = parsed.text || '';
+          file = parsed.file;
+        }
+      } catch (e) {}
+      
+      return {
+        id: msg.id.toString(),
+        text: text,
+        isMe: msg.is_me,
+        from: msg.from_username,
+        timestamp: msg.timestamp,
+        file: file
+      };
+    });
     
     res.json({ success: true, messages: formattedMessages });
   } catch (error) {
@@ -258,6 +266,12 @@ app.post('/api/messages/history', async (req, res) => {
 
 // ============ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ============
 const saveMessageToDb = async (from, to, message, timestamp) => {
+  // Пропускаем бота
+  if (to === '🤖 Бот-помощник' || from === '🤖 Бот-помощник') {
+    console.log(`🤖 Сообщение с ботом (пропускаем БД): ${from} -> ${to}`);
+    return true;
+  }
+  
   try {
     const fromUser = await pool.query('SELECT id FROM users WHERE username = $1', [from]);
     const toUser = await pool.query('SELECT id FROM users WHERE username = $1', [to]);
@@ -291,37 +305,28 @@ io.on('connection', (socket) => {
     onlineUsers.set(username, socket.id);
     console.log(`📱 Пользователь "${username}" онлайн. Всего онлайн: ${onlineUsers.size}`);
     
-    await pool.query(
-      'UPDATE users SET last_seen = CURRENT_TIMESTAMP WHERE username = $1',
-      [username]
-    );
+    if (username !== '🤖 Бот-помощник') {
+      await pool.query(
+        'UPDATE users SET last_seen = CURRENT_TIMESTAMP WHERE username = $1',
+        [username]
+      );
+    }
     
     io.emit('onlineUsers', Array.from(onlineUsers.keys()));
   });
   
-socket.on('privateMessage', async (data) => {
-  const { to, from, message, timestamp, file } = data;
-  console.log(`💬 Сообщение от ${from} к ${to}: "${message}"`, file ? `(файл: ${file.name})` : '');
-  
-  // Сохраняем в БД (включая информацию о файле)
-  let fullMessage = message;
-  if (file) {
-    fullMessage = JSON.stringify({ text: message, file });
-  }
-  
-  const saved = await saveMessageToDb(from, to, fullMessage, timestamp);
-  
-  // Отправляем получателю
-  const targetSocketId = onlineUsers.get(to);
-  if (targetSocketId) {
-    io.to(targetSocketId).emit('newMessage', { 
-      id: Date.now().toString(),
-      from, 
-      message, 
-      timestamp,
-      file,
-      isMe: false
-    });
+  socket.on('privateMessage', async (data) => {
+    const { to, from, message, timestamp, file } = data;
+    console.log(`💬 Сообщение от ${from} к ${to}: "${message}"`, file ? `(файл: ${file.name})` : '');
+    
+    let fullMessage = message;
+    if (file) {
+      fullMessage = JSON.stringify({ text: message, file });
+    }
+    
+    await saveMessageToDb(from, to, fullMessage, timestamp);
+    
+    // Всегда отправляем обратно отправителю
     socket.emit('messageSent', { 
       id: Date.now().toString(),
       to, 
@@ -330,8 +335,25 @@ socket.on('privateMessage', async (data) => {
       file,
       isMe: true
     });
-  }
-});
+    
+    // Отправляем получателю, если он онлайн и не бот
+    if (to !== '🤖 Бот-помощник') {
+      const targetSocketId = onlineUsers.get(to);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('newMessage', { 
+          id: Date.now().toString(),
+          from, 
+          message, 
+          timestamp,
+          file,
+          isMe: false
+        });
+        console.log(`✅ Сообщение доставлено ${to}`);
+      } else {
+        console.log(`❌ Пользователь ${to} не в сети`);
+      }
+    }
+  });
   
   socket.on('disconnect', async () => {
     let disconnectedUser = null;
@@ -350,7 +372,6 @@ socket.on('privateMessage', async (data) => {
   });
 });
 
-// ============ ЗАПУСК СЕРВЕРА ============
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`\n🚀 Сервер запущен на порту ${PORT}`);
