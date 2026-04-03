@@ -4,6 +4,9 @@ const socketIo = require('socket.io');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const { Pool } = require('pg');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 app.use(cors());
@@ -17,16 +20,15 @@ const io = socketIo(server, {
   }
 });
 
-// Подключение к PostgreSQL
+// ============ ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ ============
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// Создание всех таблиц
+// ============ СОЗДАНИЕ ТАБЛИЦ ============
 const initDb = async () => {
   try {
-    // Таблица пользователей
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -37,7 +39,6 @@ const initDb = async () => {
       )
     `);
     
-    // Таблица сообщений
     await pool.query(`
       CREATE TABLE IF NOT EXISTS messages (
         id SERIAL PRIMARY KEY,
@@ -52,7 +53,6 @@ const initDb = async () => {
       )
     `);
     
-    // Индексы для быстрого поиска
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_messages_from_username ON messages(from_username);
       CREATE INDEX IF NOT EXISTS idx_messages_to_username ON messages(to_username);
@@ -68,7 +68,55 @@ const initDb = async () => {
 
 initDb();
 
-// ============ API для пользователей ============
+// ============ НАСТРОЙКА ЗАГРУЗКИ ФАЙЛОВ ============
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueName = `${Date.now()}-${Math.round(Math.random() * 1E9)}${path.extname(file.originalname)}`;
+    cb(null, uniqueName);
+  }
+});
+
+const upload = multer({ 
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 }
+});
+
+// ============ API ============
+
+// Загрузка файла
+app.post('/api/upload', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'Файл не загружен' });
+    }
+    
+    const fileUrl = `${process.env.PUBLIC_URL || 'https://alinagramm-server-production.up.railway.app'}/uploads/${req.file.filename}`;
+    
+    res.json({
+      success: true,
+      file: {
+        url: fileUrl,
+        name: req.file.originalname,
+        size: req.file.size,
+        type: req.file.mimetype.startsWith('image/') ? 'image' : 'document'
+      }
+    });
+  } catch (error) {
+    console.error('Ошибка загрузки файла:', error);
+    res.status(500).json({ error: 'Ошибка загрузки файла' });
+  }
+});
+
+// Статическая раздача файлов
+app.use('/uploads', express.static(uploadDir));
 
 // Регистрация
 app.post('/api/register', async (req, res) => {
@@ -89,7 +137,6 @@ app.post('/api/register', async (req, res) => {
   }
   
   try {
-    // Проверяем, существует ли пользователь
     const existingUser = await pool.query(
       'SELECT id FROM users WHERE username = $1',
       [username]
@@ -101,7 +148,6 @@ app.post('/api/register', async (req, res) => {
     
     const hashedPassword = await bcrypt.hash(password, 10);
     
-    // Создаём пользователя
     await pool.query(
       'INSERT INTO users (username, password_hash) VALUES ($1, $2)',
       [username, hashedPassword]
@@ -142,7 +188,6 @@ app.post('/api/login', async (req, res) => {
       return res.status(401).json({ error: 'Неверный пароль' });
     }
     
-    // Обновляем время последнего входа
     await pool.query(
       'UPDATE users SET last_seen = CURRENT_TIMESTAMP WHERE id = $1',
       [user.id]
@@ -155,7 +200,7 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// Получение списка всех пользователей
+// Получение списка пользователей
 app.get('/api/users', async (req, res) => {
   try {
     const result = await pool.query(
@@ -168,9 +213,7 @@ app.get('/api/users', async (req, res) => {
   }
 });
 
-// ============ API для сообщений ============
-
-// Получение истории сообщений между двумя пользователями
+// История сообщений
 app.post('/api/messages/history', async (req, res) => {
   const { user1, user2 } = req.body;
   
@@ -198,7 +241,6 @@ app.post('/api/messages/history', async (req, res) => {
       [user1, user2]
     );
     
-    // Форматируем сообщения для клиента
     const formattedMessages = result.rows.map(msg => ({
       id: msg.id.toString(),
       text: msg.message,
@@ -214,10 +256,9 @@ app.post('/api/messages/history', async (req, res) => {
   }
 });
 
-// Сохранение сообщения в БД
+// ============ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ============
 const saveMessageToDb = async (from, to, message, timestamp) => {
   try {
-    // Получаем ID пользователей
     const fromUser = await pool.query('SELECT id FROM users WHERE username = $1', [from]);
     const toUser = await pool.query('SELECT id FROM users WHERE username = $1', [to]);
     
@@ -240,9 +281,8 @@ const saveMessageToDb = async (from, to, message, timestamp) => {
   }
 };
 
-// ============ Socket.io ============
-
-const onlineUsers = new Map(); // username -> socketId
+// ============ SOCKET.IO ============
+const onlineUsers = new Map();
 
 io.on('connection', (socket) => {
   console.log('✅ Пользователь подключился:', socket.id);
@@ -251,7 +291,6 @@ io.on('connection', (socket) => {
     onlineUsers.set(username, socket.id);
     console.log(`📱 Пользователь "${username}" онлайн. Всего онлайн: ${onlineUsers.size}`);
     
-    // Обновляем статус в БД
     await pool.query(
       'UPDATE users SET last_seen = CURRENT_TIMESTAMP WHERE username = $1',
       [username]
@@ -264,7 +303,6 @@ io.on('connection', (socket) => {
     const { to, from, message, timestamp } = data;
     console.log(`💬 Сообщение от ${from} к ${to}: "${message}"`);
     
-    // Сохраняем в БД
     const saved = await saveMessageToDb(from, to, message, timestamp);
     
     if (!saved) {
@@ -272,7 +310,6 @@ io.on('connection', (socket) => {
       return;
     }
     
-    // Отправляем, если получатель онлайн
     const targetSocketId = onlineUsers.get(to);
     
     if (targetSocketId) {
@@ -314,8 +351,7 @@ io.on('connection', (socket) => {
   });
 });
 
-// ============ Запуск сервера ============
-
+// ============ ЗАПУСК СЕРВЕРА ============
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`\n🚀 Сервер запущен на порту ${PORT}`);
