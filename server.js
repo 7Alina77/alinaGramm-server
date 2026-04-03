@@ -299,40 +299,39 @@ io.on('connection', (socket) => {
     io.emit('onlineUsers', Array.from(onlineUsers.keys()));
   });
   
-  socket.on('privateMessage', async (data) => {
-    const { to, from, message, timestamp } = data;
-    console.log(`💬 Сообщение от ${from} к ${to}: "${message}"`);
-    
-    const saved = await saveMessageToDb(from, to, message, timestamp);
-    
-    if (!saved) {
-      socket.emit('messageError', { error: 'Не удалось сохранить сообщение' });
-      return;
-    }
-    
-    const targetSocketId = onlineUsers.get(to);
-    
-    if (targetSocketId) {
-      io.to(targetSocketId).emit('newMessage', { 
-        id: Date.now().toString(),
-        from, 
-        message, 
-        timestamp,
-        isMe: false
-      });
-      socket.emit('messageSent', { 
-        id: Date.now().toString(),
-        to, 
-        message, 
-        timestamp,
-        isMe: true
-      });
-      console.log(`✅ Сообщение доставлено ${to}`);
-    } else {
-      console.log(`❌ Пользователь ${to} не в сети, сообщение сохранено в БД`);
-      socket.emit('messageSaved', { to, message });
-    }
-  });
+socket.on('privateMessage', async (data) => {
+  const { to, from, message, timestamp, file } = data;
+  console.log(`💬 Сообщение от ${from} к ${to}: "${message}"`, file ? `(файл: ${file.name})` : '');
+  
+  // Сохраняем в БД (включая информацию о файле)
+  let fullMessage = message;
+  if (file) {
+    fullMessage = JSON.stringify({ text: message, file });
+  }
+  
+  const saved = await saveMessageToDb(from, to, fullMessage, timestamp);
+  
+  // Отправляем получателю
+  const targetSocketId = onlineUsers.get(to);
+  if (targetSocketId) {
+    io.to(targetSocketId).emit('newMessage', { 
+      id: Date.now().toString(),
+      from, 
+      message, 
+      timestamp,
+      file,
+      isMe: false
+    });
+    socket.emit('messageSent', { 
+      id: Date.now().toString(),
+      to, 
+      message, 
+      timestamp,
+      file,
+      isMe: true
+    });
+  }
+});
   
   socket.on('disconnect', async () => {
     let disconnectedUser = null;
