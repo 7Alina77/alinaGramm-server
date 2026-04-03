@@ -54,10 +54,21 @@ const initDb = async () => {
     `);
     
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS push_tokens (
+        id SERIAL PRIMARY KEY,
+        username VARCHAR(100) REFERENCES users(username) ON DELETE CASCADE,
+        token TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_messages_from_username ON messages(from_username);
       CREATE INDEX IF NOT EXISTS idx_messages_to_username ON messages(to_username);
       CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
       CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+      CREATE INDEX IF NOT EXISTS idx_push_tokens_username ON push_tokens(username);
     `);
     
     console.log('✅ База данных инициализирована');
@@ -208,6 +219,43 @@ app.get('/api/users', async (req, res) => {
   }
 });
 
+// Сохранение push-токена
+app.post('/api/users/token', async (req, res) => {
+  const { userId, token } = req.body;
+  
+  if (!userId || !token) {
+    return res.status(400).json({ error: 'Не указаны userId или token' });
+  }
+  
+  try {
+    // Проверяем, существует ли уже такой токен
+    const existingToken = await pool.query(
+      'SELECT id FROM push_tokens WHERE username = $1 AND token = $2',
+      [userId, token]
+    );
+    
+    if (existingToken.rows.length === 0) {
+      await pool.query(
+        `INSERT INTO push_tokens (username, token) VALUES ($1, $2)`,
+        [userId, token]
+      );
+      console.log(`📱 Push-токен сохранён для ${userId}`);
+    } else {
+      // Обновляем время
+      await pool.query(
+        'UPDATE push_tokens SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
+        [existingToken.rows[0].id]
+      );
+    }
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Ошибка сохранения push-токена:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// История сообщений
 app.post('/api/messages/history', async (req, res) => {
   const { user1, user2 } = req.body;
   
@@ -295,6 +343,46 @@ const saveMessageToDb = async (from, to, message, timestamp) => {
   }
 };
 
+// Функция отправки push-уведомления
+const sendPushNotification = async (toUsername, fromUsername, message) => {
+  try {
+    const result = await pool.query(
+      'SELECT token FROM push_tokens WHERE username = $1 ORDER BY updated_at DESC LIMIT 1',
+      [toUsername]
+    );
+    
+    if (result.rows.length === 0) {
+      console.log(`❌ Нет push-токена для ${toUsername}`);
+      return;
+    }
+    
+    const token = result.rows[0].token;
+    
+    const response = await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        to: token,
+        sound: 'default',
+        title: `📩 ${fromUsername}`,
+        body: message && message.trim() ? message : '📎 Отправил(а) файл',
+        data: {
+          from: fromUsername,
+          type: 'message',
+        },
+      }),
+    });
+    
+    const data = await response.json();
+    console.log(`📤 Push-уведомление для ${toUsername}:`, data);
+  } catch (error) {
+    console.error('Ошибка отправки push:', error);
+  }
+};
+
 // ============ SOCKET.IO ============
 const onlineUsers = new Map();
 
@@ -326,6 +414,11 @@ io.on('connection', (socket) => {
     
     await saveMessageToDb(from, to, fullMessage, timestamp);
     
+    // Отправляем push-уведомление получателю (если не бот)
+    if (to !== '🤖 Бот-помощник') {
+      await sendPushNotification(to, from, message || '📎 Файл');
+    }
+    
     // Всегда отправляем обратно отправителю
     socket.emit('messageSent', { 
       id: Date.now().toString(),
@@ -350,7 +443,7 @@ io.on('connection', (socket) => {
         });
         console.log(`✅ Сообщение доставлено ${to}`);
       } else {
-        console.log(`❌ Пользователь ${to} не в сети`);
+        console.log(`❌ Пользователь ${to} не в сети, push отправлен`);
       }
     }
   });
