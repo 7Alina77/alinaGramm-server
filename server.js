@@ -10,16 +10,26 @@ const fs = require('fs');
 
 const app = express();
 
-// ============ НАСТРОЙКА CORS (ДЛЯ ВСЕХ УСТРОЙСТВ) ============
+// ============ НАСТРОЙКА CORS ============
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
   credentials: true
 }));
 
-// Для preflight запросов
 app.options('*', cors());
+
+// Ручная настройка заголовков
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
 
 app.use(express.json());
 
