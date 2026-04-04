@@ -9,15 +9,29 @@ const path = require('path');
 const fs = require('fs');
 
 const app = express();
-app.use(cors());
+
+// ============ НАСТРОЙКА CORS (ДЛЯ ВСЕХ УСТРОЙСТВ) ============
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
+
+// Для preflight запросов
+app.options('*', cors());
+
 app.use(express.json());
 
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
     origin: "*",
-    methods: ["GET", "POST"]
-  }
+    methods: ["GET", "POST"],
+    credentials: true,
+    allowedHeaders: ["Content-Type", "Authorization"]
+  },
+  transports: ['websocket', 'polling']
 });
 
 // ============ ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ ============
@@ -101,6 +115,11 @@ const upload = multer({
 });
 
 // ============ API ============
+
+// Тестовый маршрут для проверки работы сервера
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: Date.now() });
+});
 
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
@@ -228,7 +247,6 @@ app.post('/api/users/token', async (req, res) => {
   }
   
   try {
-    // Проверяем, существует ли уже такой токен
     const existingToken = await pool.query(
       'SELECT id FROM push_tokens WHERE username = $1 AND token = $2',
       [userId, token]
@@ -241,7 +259,6 @@ app.post('/api/users/token', async (req, res) => {
       );
       console.log(`📱 Push-токен сохранён для ${userId}`);
     } else {
-      // Обновляем время
       await pool.query(
         'UPDATE push_tokens SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
         [existingToken.rows[0].id]
